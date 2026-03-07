@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "email": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["<path-to>/email/server.py"]
+    }
+  }
+}
