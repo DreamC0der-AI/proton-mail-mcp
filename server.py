@@ -20,6 +20,9 @@ import email.utils
 import email.header
 import email.mime.text
 import email.mime.multipart
+import email.mime.base
+import email.encoders
+import mimetypes
 import json
 import os
 import re
@@ -518,9 +521,13 @@ def _imap_move(uid: str, source_mailbox: str, dest_mailbox: str):
 
 def _smtp_send(to: str, subject: str, body: str, cc: str = "",
                bcc: str = "", in_reply_to: str = "", references: str = "",
-               html: bool = False):
-    """Send an email via SMTP."""
-    msg = email.mime.multipart.MIMEMultipart("alternative")
+               html: bool = False, attachments: list[str] | None = None):
+    """Send an email via SMTP, optionally with file attachments."""
+    if attachments:
+        msg = email.mime.multipart.MIMEMultipart("mixed")
+    else:
+        msg = email.mime.multipart.MIMEMultipart("alternative")
+
     msg["From"] = EMAIL_USER
     msg["To"] = to
     msg["Subject"] = subject
@@ -538,6 +545,20 @@ def _smtp_send(to: str, subject: str, body: str, cc: str = "",
         msg.attach(email.mime.text.MIMEText(body, "html", "utf-8"))
     else:
         msg.attach(email.mime.text.MIMEText(body, "plain", "utf-8"))
+
+    for file_path in (attachments or []):
+        path = Path(file_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Attachment not found: {file_path}")
+        content_type, _ = mimetypes.guess_type(str(path))
+        if content_type is None:
+            content_type = "application/octet-stream"
+        maintype, subtype = content_type.split("/", 1)
+        part = email.mime.base.MIMEBase(maintype, subtype)
+        part.set_payload(path.read_bytes())
+        email.encoders.encode_base64(part)
+        part.add_header("Content-Disposition", "attachment", filename=path.name)
+        msg.attach(part)
 
     # Build recipient list
     recipients = [addr.strip() for addr in to.split(",")]
@@ -839,7 +860,10 @@ def search_emails(
 
 
 @mcp.tool(
-    description="Send an email via SMTP. Supports plain text and HTML bodies, CC and BCC."
+    description=(
+        "Send an email via SMTP. Supports plain text and HTML bodies, CC, BCC, "
+        "and file attachments specified as local file paths."
+    )
 )
 def send_email(
     to: str,
@@ -848,6 +872,7 @@ def send_email(
     cc: str = "",
     bcc: str = "",
     html: bool = False,
+    attachments: list[str] | None = None,
 ) -> dict:
     """Send an email.
 
@@ -858,20 +883,26 @@ def send_email(
         cc: CC recipients, comma-separated (optional)
         bcc: BCC recipients, comma-separated (optional)
         html: If True, body is treated as HTML (default: False)
+        attachments: List of local file paths to attach (optional)
     """
-    message_id = _smtp_send(to, subject, body, cc=cc, bcc=bcc, html=html)
-    return {
+    message_id = _smtp_send(to, subject, body, cc=cc, bcc=bcc, html=html,
+                            attachments=attachments)
+    result = {
         "status": "sent",
         "to": to,
         "subject": subject,
         "message_id": message_id,
     }
+    if attachments:
+        result["attachments"] = [Path(p).name for p in attachments]
+    return result
 
 
 @mcp.tool(
     description=(
         "Reply to an email. Automatically sets In-Reply-To and References headers "
-        "for proper threading. Prefixes subject with 'Re: ' if not already present."
+        "for proper threading. Prefixes subject with 'Re: ' if not already present. "
+        "Supports file attachments."
     )
 )
 def reply_email(
@@ -880,6 +911,7 @@ def reply_email(
     mailbox: str = "INBOX",
     reply_all: bool = False,
     html: bool = False,
+    attachments: list[str] | None = None,
 ) -> dict:
     """Reply to an email.
 
@@ -889,6 +921,7 @@ def reply_email(
         mailbox: Mailbox containing the original email (default: INBOX)
         reply_all: If True, reply to all recipients (default: False)
         html: If True, body is treated as HTML (default: False)
+        attachments: List of local file paths to attach (optional)
     """
     # Fetch original message for threading headers
     original = read_email(uid=uid, mailbox=mailbox)
@@ -933,9 +966,10 @@ def reply_email(
     message_id = _smtp_send(
         to, subject, body, cc=cc,
         in_reply_to=in_reply_to, references=references, html=html,
+        attachments=attachments,
     )
 
-    return {
+    result = {
         "status": "sent",
         "to": to,
         "cc": cc,
@@ -943,6 +977,9 @@ def reply_email(
         "in_reply_to": in_reply_to,
         "message_id": message_id,
     }
+    if attachments:
+        result["attachments"] = [Path(p).name for p in attachments]
+    return result
 
 
 @mcp.tool(
